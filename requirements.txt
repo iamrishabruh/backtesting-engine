@@ -1,7 +1,7 @@
 alpha_vantage
 kafka-python
 pandas
-backtesting
+requests
 PyYAML
 streamlit
 plotly
@@ -10,3 +10,4 @@ scikit-learn
 matplotlib
 nltk
 watchdog
+pytest

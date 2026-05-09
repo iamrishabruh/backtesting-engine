@@ -21,7 +21,9 @@ def load_config():
     This ensures you can keep placeholders in config.yaml while reading
     real secrets from environment (e.g., Docker, .env, cloud platforms).
     """
-    with open("config/config.yaml", "r") as f:
+    root = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+    cfg_path = os.path.join(root, "config", "config.yaml")
+    with open(cfg_path, "r") as f:
         config = yaml.safe_load(f)
 
     # Override placeholders with environment variables if available
@@ -138,9 +140,8 @@ def main():
     data_file_rel = config.get("historical_data", "data/historical_data.csv")
     kafka_conf = config["kafka"]
 
-    # 4. Construct CSV path
-    current_dir = os.path.dirname(os.path.realpath(__file__))
-    parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
+    # 4. Construct CSV path (project root)
+    parent_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
     csv_path = os.path.abspath(os.path.join(parent_dir, data_file_rel))
 
     # 5. Create Kafka producer

@@ -12,3 +12,4 @@ __pycache__/
 
 # If you have a venv directory in your project root
 venv/
+.pytest_cache/

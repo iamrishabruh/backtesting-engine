@@ -1,147 +1,202 @@
 # ui/app.py
-
 import os
 import sys
+
+import matplotlib.pyplot as plt
+import pandas as pd
 import streamlit as st
 import yaml
-import pandas as pd
-import matplotlib.pyplot as plt
 
-# Add the project root to sys.path.
 current_dir = os.path.dirname(os.path.realpath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+    sys.path.insert(0, parent_dir)
 
-# Load configuration.
 config_path = os.path.join(parent_dir, "config", "config.yaml")
 with open(config_path, "r") as file:
     config = yaml.safe_load(file)
 
-# Resolve the historical data file path.
-data_file_rel = config.get("historical_data", "data/historical_data.csv")
+st.set_page_config(page_title="Backtest & execution simulator", layout="wide")
+
+data_file_rel = config.get("historical_data", "examples/sample_ohlcv.csv")
 data_file = os.path.abspath(os.path.join(parent_dir, data_file_rel))
 if not os.path.exists(data_file):
     st.warning(f"Data file not found: {data_file}")
 else:
-    st.write(f"Using data file: {data_file}")
+    st.caption(f"Data file: `{data_file}`")
 
-from utils.data_access import load_historical_data
-from the_backtesting.engine import BacktestEngine
-from ml_models.sample_strategy import AdvancedStrategy
-from ml_models.ml_trading_model import train_lstm_model, adjust_strategy_with_predictions
+from backtesting.comparison import run_baseline_comparison
+from backtesting.engine import BacktestEngine
+from backtesting.evaluation import WALK_FORWARD_NOT_IMPLEMENTED
+from data_ingestion.csv_loader import load_historical_data
+from ml_models.ml_trading_model import adjust_strategy_with_predictions, train_lstm_model
+from strategies.advanced_momentum import AdvancedMomentumStrategy
 
-st.title("Robust Stock Backtesting & ML Trading Tool")
-
-st.sidebar.header("Ticker Selection")
-st.sidebar.markdown(
+st.title("Backtesting and execution simulation")
+st.markdown(
     """
-    **Ticker:**  
-    Enter the ticker symbol of the stock you wish to analyze.  
-    Examples:
-    - **AAPL** for Apple  
-    - **MSFT** for Microsoft  
-    - **GOOGL** for Alphabet  
-    """
+This UI drives a **bar-level execution simulator** (commissions, slippage, stop / take-profit) and
+optional **baseline strategy comparison**. Machine learning is **optional** and not required for
+core backtests.
+
+**Not financial advice.** Outputs are for research and engineering evaluation only.
+"""
 )
-ticker = st.sidebar.text_input("Ticker Symbol", value=config.get("ticker", "AAPL"))
 
-st.sidebar.header("Strategy & Risk Management")
-short_window = st.sidebar.number_input("Short MA Window", min_value=1, value=50)
-long_window = st.sidebar.number_input("Long MA Window", min_value=1, value=200)
-base_trade_size = st.sidebar.number_input("Base Trade Size", min_value=1, value=config.get("trade_size", 100))
-initial_cash = st.sidebar.number_input("Initial Cash", value=config.get("initial_cash", 100000))
-commission = st.sidebar.number_input("Commission Rate", value=config.get("commission", 0.001))
-stop_loss_pct = st.sidebar.slider("Stop-Loss (%)", min_value=0.5, max_value=10.0, value=2.0) / 100.0
-take_profit_pct = st.sidebar.slider("Take-Profit (%)", min_value=0.5, max_value=20.0, value=4.0) / 100.0
-entry_threshold = st.sidebar.slider("Entry Threshold (%)", min_value=0.1, max_value=5.0, value=1.0) / 100.0
-exit_threshold = st.sidebar.slider("Exit Threshold (%)", min_value=0.1, max_value=5.0, value=0.5) / 100.0
+if WALK_FORWARD_NOT_IMPLEMENTED:
+    st.info(
+        "Walk-forward / rolling validation is **not implemented**. Parameter grids and LSTM fitting "
+        "on the same timeline as the backtest are **in-sample** and can look better than true "
+        "out-of-sample performance. See `backtesting/evaluation.py` and the README."
+    )
 
-# Optimization is now automatic unless disabled.
-use_optimization = st.sidebar.checkbox("Use Automated Optimization", value=True)
-
-data_file_input = st.sidebar.text_input("Historical Data File", value=config.get("historical_data", "data/historical_data.csv"))
+st.sidebar.header("Data")
+ticker = st.sidebar.text_input("Ticker label (for ingestion only)", value=config.get("ticker", "AAPL"))
+data_file_input = st.sidebar.text_input("Historical CSV path", value=data_file_rel)
 if not os.path.isabs(data_file_input):
     data_file_input = os.path.abspath(os.path.join(parent_dir, data_file_input))
 
-# Reset Button: Delete current CSV file.
-if st.sidebar.button("Reset Data"):
+st.sidebar.header("Execution parameters")
+short_window = st.sidebar.number_input("Advanced strategy: short MA window", min_value=2, value=50)
+long_window = st.sidebar.number_input("Advanced strategy: long MA window", min_value=3, value=200)
+base_trade_size = st.sidebar.number_input("Trade size (shares)", min_value=1, value=int(config.get("trade_size", 100)))
+initial_cash = st.sidebar.number_input("Initial cash", value=float(config.get("initial_cash", 100_000)))
+commission = st.sidebar.number_input("Commission rate (per side, e.g. 0.001 = 0.1%)", value=float(config.get("commission", 0.001)))
+slippage_pct = st.sidebar.number_input("Slippage band (+/- fraction)", min_value=0.0, value=0.001, format="%.4f")
+random_seed = st.sidebar.number_input("Random seed (slippage)", value=42, step=1)
+entry_threshold = st.sidebar.slider("Entry threshold (fraction)", min_value=0.001, max_value=0.05, value=float(config.get("entry_threshold", 0.01)))
+exit_threshold = st.sidebar.slider("Exit threshold (fraction)", min_value=0.001, max_value=0.05, value=float(config.get("exit_threshold", 0.005)))
+
+st.sidebar.header("Optional ML (LSTM)")
+st.sidebar.markdown(
+    """
+LSTM training here is **experimental**. It does not establish predictive edge; see module docstring
+in `ml_models/ml_trading_model.py` for limitations (non-stationarity, leakage risk in scaling, no
+walk-forward design).
+"""
+)
+run_lstm = st.sidebar.checkbox("Adjust strategy parameters with LSTM (slow, requires TensorFlow)", value=False)
+
+use_optimization = st.sidebar.checkbox("In-sample parameter grid (advanced strategy only)", value=False)
+
+if st.sidebar.button("Reset cached CSV (config path)"):
     if os.path.exists(data_file):
         os.remove(data_file)
-        st.success("Data file deleted. You can now fetch new data.")
+        st.sidebar.success("Removed file at config path.")
     else:
-        st.info("No data file exists to delete.")
+        st.sidebar.info("Nothing to delete at config path.")
 
 st.sidebar.header("Actions")
-if st.sidebar.button("Fetch Full Data & Enrich"):
-    st.write("Fetching and enriching full data (~30 days) from Alpha Vantage & NewsAPI for ticker:", ticker)
+if st.sidebar.button("Fetch & enrich (Alpha Vantage / Kafka)"):
+    st.write("Ingestion job for ticker:", ticker)
     import subprocess
-    subprocess.run(["python", os.path.join(parent_dir, "data_ingestion", "producer.py"), "--ticker", ticker])
-    st.success("Data ingested and saved.")
 
-if st.sidebar.button("Train ML Model"):
-    st.write("Training LSTM model on full historical data...")
-    model, scaler = train_lstm_model(data_file_input, look_back=60, epochs=5, batch_size=32)
-    st.success("ML Model trained. See the plot for actual vs. predicted prices.")
+    subprocess.run(
+        [sys.executable, os.path.join(parent_dir, "data_ingestion", "producer.py"), "--ticker", ticker],
+        cwd=parent_dir,
+    )
+    st.success("Producer finished (check logs if APIs or Kafka are unavailable).")
 
-if st.sidebar.button("Optimize & Run Backtest"):
-    st.write("Loading full historical data...")
+if st.sidebar.button("Run baseline comparison (buy & hold, SMA cross, advanced)"):
     data = load_historical_data(data_file_input)
-    st.write("Data loaded:", data.shape[0], "rows")
-    
-    # Instantiate strategy with current slider inputs.
-    strategy = AdvancedStrategy(short_window=short_window, long_window=long_window,
-                                  entry_threshold=entry_threshold, exit_threshold=exit_threshold,
-                                  base_trade_size=base_trade_size)
-    
-    # If optimization is enabled, automatically optimize the strategy parameters.
+    st.write("Bars loaded:", data.shape[0])
+    comp = run_baseline_comparison(
+        data,
+        initial_cash=initial_cash,
+        commission=commission,
+        trade_size=base_trade_size,
+        slippage_pct=slippage_pct,
+        random_seed=int(random_seed),
+        advanced_short=int(short_window),
+        advanced_long=int(long_window),
+    )
+    rows = []
+    for name, perf in comp.items():
+        rows.append(
+            {
+                "Strategy": name,
+                "Final cash": round(perf["Final Cash"], 2),
+                "Total return": round(perf["Total Return"] * 100, 4),
+                "Trades": perf["Number of Trades"],
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+if st.sidebar.button("Run advanced-strategy backtest"):
+    data = load_historical_data(data_file_input)
+    st.write("Bars loaded:", data.shape[0])
+
+    if long_window <= short_window:
+        st.error("Long window must be greater than short window.")
+        st.stop()
+
+    strategy = AdvancedMomentumStrategy(
+        short_window=int(short_window),
+        long_window=int(long_window),
+        entry_threshold=entry_threshold,
+        exit_threshold=exit_threshold,
+        base_trade_size=int(base_trade_size),
+    )
+
     if use_optimization:
-        st.write("Optimizing strategy parameters automatically...")
-        opt_params = strategy.optimize_parameters(data, initial_cash, commission, base_trade_size)
-        st.write("Optimized Parameters:", opt_params)
-    else:
-        st.write("Using manual parameters from UI.")
-    
-    st.write("Adjusting strategy based on ML predictions...")
-    model, scaler = train_lstm_model(data_file_input, look_back=60, epochs=3, batch_size=32)
-    strategy = adjust_strategy_with_predictions(strategy, model, scaler, data, look_back=60)
-    st.write("Final strategy parameters:", {
-        "entry_threshold": strategy.entry_threshold,
-        "exit_threshold": strategy.exit_threshold,
-        "base_trade_size": strategy.base_trade_size
-    })
-    
-    engine = BacktestEngine(data, strategy, initial_cash=initial_cash, commission=commission,
-                              trade_size=strategy.base_trade_size, slippage_pct=0.001)
+        st.write("Running in-sample grid search (same timeline as backtest).")
+        opt_params = strategy.optimize_parameters(data, initial_cash, commission, base_trade_size, random_seed=int(random_seed))
+        st.json(opt_params)
+
+    if run_lstm:
+        st.write("Training LSTM (illustrative; see limitations in `ml_models/ml_trading_model.py`).")
+        model, scaler = train_lstm_model(data_file_input, look_back=min(60, max(10, len(data) // 4)), epochs=3, batch_size=32)
+        if model is not None and scaler is not None:
+            strategy = adjust_strategy_with_predictions(strategy, model, scaler, data, look_back=min(60, max(10, len(data) // 4)))
+            st.json(
+                {
+                    "entry_threshold": strategy.entry_threshold,
+                    "exit_threshold": strategy.exit_threshold,
+                    "base_trade_size": strategy.base_trade_size,
+                }
+            )
+
+    engine = BacktestEngine(
+        data,
+        strategy,
+        initial_cash=initial_cash,
+        commission=commission,
+        trade_size=strategy.base_trade_size,
+        slippage_pct=slippage_pct,
+        random_seed=int(random_seed),
+        allow_force_trade=False,
+    )
     performance = engine.run()
-    
-    st.write("### Backtest Performance")
-    st.write("Final Cash: $", round(performance["Final Cash"], 2))
-    st.write("Total Return: ", round(performance["Total Return"] * 100, 2), "%")
-    st.write("Number of Trades: ", performance["Number of Trades"])
-    st.write("Average Profit per Trade: $", round(performance["Average Profit per Trade"], 2))
-    st.write("Max Profit: $", round(performance["Max Profit"], 2))
-    st.write("Max Loss: $", round(performance["Max Loss"], 2))
-    
+
+    st.subheader("Results (one simulated path)")
+    st.metric("Final cash", f"${performance['Final Cash']:,.2f}")
+    st.metric("Total return", f"{performance['Total Return'] * 100:.4f}%")
+    st.metric("Closed trades", performance["Number of Trades"])
+
     trades = performance["Trades"]
     if trades:
-        trade_df = pd.DataFrame([{
-            "Entry Time": t.entry_time,
-            "Entry Price": t.entry_price,
-            "Exit Time": t.exit_time,
-            "Exit Price": t.exit_price,
-            "Profit": t.profit(),
-            "Log": str(t.log)
-        } for t in trades if t.is_closed()])
-        st.write("### Trade Details")
-        st.dataframe(trade_df)
-    
-    profits = [t.profit() for t in trades if t.is_closed()]
-    if profits:
+        trade_df = pd.DataFrame(
+            [
+                {
+                    "Entry Time": t.entry_time,
+                    "Entry Price": t.entry_price,
+                    "Exit Time": t.exit_time,
+                    "Exit Price": t.exit_price,
+                    "P/L": t.profit(),
+                    "Exit reason": t.exit_reason,
+                    "Log": str(t.log),
+                }
+                for t in trades
+                if t.is_closed()
+            ]
+        )
+        st.dataframe(trade_df, use_container_width=True)
+
+        pnl = [t.profit() for t in trades if t.is_closed()]
         fig, ax = plt.subplots()
-        ax.plot(range(1, len(profits) + 1), profits, marker="o", color="red", label="Trade Profit")
-        ax.set_title("Profit per Trade")
-        ax.set_xlabel("Trade Number")
-        ax.set_ylabel("Profit ($)")
+        ax.plot(range(1, len(pnl) + 1), pnl, marker="o", color="C0", label="Trade P/L")
+        ax.set_title("P/L per closed trade (simulated)")
+        ax.set_xlabel("Trade index")
+        ax.set_ylabel("P/L (currency)")
         ax.legend()
         st.pyplot(fig)
