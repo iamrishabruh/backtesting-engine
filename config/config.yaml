@@ -5,7 +5,7 @@ initial_cash: 100000
 commission: 0.001
 trade_size: 100
 ticker: "AAPL"
-historical_data: "data/historical_data.csv"
+historical_data: "examples/sample_ohlcv.csv"
 
 # Risk management defaults
 stop_loss_pct: 0.02
